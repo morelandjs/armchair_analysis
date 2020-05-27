@@ -3,8 +3,8 @@ Armchair Analysis
 
 *Python wrapper for armchairanalysis.com NFL data*
 
-Install
--------
+Quick start
+-----------
 
 Requirements: Python with pandas_.
 
@@ -15,3 +15,9 @@ Install the latest release with pip_::
    
 .. _pip: https://pip.pypa.io
 .. _pandas: https://pandas.pydata.org/
+
+Example Usage::
+   
+   from armchair_analysis.game_data import spread_data
+   
+   print(spread_data.dataframe)
