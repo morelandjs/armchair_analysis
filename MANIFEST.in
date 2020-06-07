@@ -1,1 +1,1 @@
-include src/armchair_analysis/data/*.csv
+include src/armchair_analysis/data/*.csv.gz
