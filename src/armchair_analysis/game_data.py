@@ -2,52 +2,42 @@ import numpy as np
 import pandas as pd
 
 from . import datadir
-
+import matplotlib.pyplot as plt
 
 class GameData:
     """
     Load armchairanalysis.com NFL game data and preprocess
-    it into a form that is useful for calibrating a point spread
+    it into a form that is suitable for calibrating a point spread
     forecasting model.
 
     """
     def __init__(self):
 
-        # merge team info with starting qb
-        team_info = self.team_info.merge(
-                self.quarterback_info,
-                on=['game_id', 'team'])
+        # merge team and quarterback info
+        team_qb_info = self.team_info.merge(
+            self.qb_points, on=['game_id', 'team', 'qb']
+        ).drop_duplicates(
+            subset=['game_id', 'team']).reset_index(drop=True)
 
         # merge game stats tables
         self.dataframe = self.game_info.merge(
-            self.schedule_info,
-            on='game_id',
-        ).merge(
-            team_info,
+            team_qb_info,
             left_on=['game_id', 'team_home'],
             right_on=['game_id', 'team'],
-        ).merge(
-            team_info,
+        ).drop(columns='team').merge(
+            team_qb_info,
             left_on=['game_id', 'team_away'],
             right_on=['game_id', 'team'],
-            suffixes=('_home', '_away')
-        )
-
-        # remove duplicate columns
-        dup_cols = self.dataframe.columns.duplicated()
-        self.dataframe = self.dataframe.loc[:, ~dup_cols]
+            suffixes=('_home', '_away'),
+            how='left')
 
         # create week identifier column
         self.dataframe['week_id'] = (
             100*self.dataframe.season + self.dataframe.week)
 
-        # create point-total outcome column
-        self.dataframe["total_outcome"] = (
-            self.dataframe.tm_pts_home + self.dataframe.tm_pts_away)
-
-        # create point-spread outcome column
-        self.dataframe["spread_outcome"] = (
-            self.dataframe.tm_pts_home - self.dataframe.tm_pts_away)
+        # add calculated columns
+        self.dataframe = self.calculated_columns(self.dataframe)
+        columns = self.dataframe.columns
 
         # rearrange columns
         order_cols = [
@@ -57,19 +47,19 @@ class GameData:
             'season',
             'week',
             'day',
-            'team_home',
             'team_away',
-            'qb_home',
+            'team_home',
             'qb_away',
-            'total_vegas',
-            'total_outcome',
+            'qb_home',
+            'qb_prev_away',
+            'qb_prev_home',
             'spread_vegas',
-            'spread_outcome',
-            *(c for c in self.dataframe.columns if c.startswith('gm_')),
-            *(c for c in self.dataframe.columns if c.startswith('tm_'))]
+            'total_vegas',
+            *(c for c in sorted(columns) if c.startswith('gm_')),
+            *(c for c in sorted(columns) if c.startswith('tm_'))]
 
-        # preprocess raw game data for modelling
-        self.dataframe = self.preprocess(self.dataframe[order_cols])
+        # arrange columns
+        self.dataframe = self.dataframe[order_cols]
 
     @property
     def game_info(self):
@@ -78,9 +68,15 @@ class GameData:
 
         """
         df_game = pd.read_csv(datadir / 'GAME.csv.gz')
+        df_schedule = pd.read_csv(datadir / 'SCHEDULE.csv.gz')
+        df_schedule.date = pd.to_datetime(df_schedule.date)
+
+        # pull game date from schedule table
+        df_game = df_game.merge(df_schedule[['gid', 'date']], on='gid')
 
         game_cols = {
             'gid': 'game_id',
+            'date': 'date',
             'seas': 'season',
             'wk': 'week',
             'day': 'day',
@@ -90,7 +86,9 @@ class GameData:
             'sprv': 'spread_vegas',
             'temp': 'gm_temperature',
             'humd': 'gm_humidity',
-            'wspd': 'gm_wind_speed'}
+            'wspd': 'gm_wind_speed',
+            'ptsv': 'tm_pts_away',
+            'ptsh': 'tm_pts_home'}
 
         df_game = df_game[game_cols.keys()].rename(game_cols, axis=1)
 
@@ -102,15 +100,17 @@ class GameData:
         QB specific attributes
 
         """
-        df_play = pd.read_csv(datadir / 'PLAY.csv.gz')
-        df_play = df_play[['gid', 'pid', 'off', 'def']]
-
         df_pass = pd.read_csv(datadir / 'PASS.csv.gz')
-        df_pass = df_pass[['pid', 'psr']]
+        df_play = pd.read_csv(datadir / 'PLAY.csv.gz')
+        df_player = pd.read_csv(datadir / 'PLAYER.csv.gz')
 
-        df_qb = df_play.merge(df_pass, on='pid')
+        df_pass_plays = df_pass[['pid', 'psr']].merge(
+            df_play[['gid', 'pid', 'off', 'def']], on='pid')
 
-        df_qb = df_qb.groupby(
+        df_qbs = df_player[(df_player.pos1 == 'QB') | (df_player.pos2 == 'QB')]
+        df_qb_pass_plays = df_pass_plays[df_pass_plays.psr.isin(df_qbs.player)]
+
+        df_qb = df_qb_pass_plays.groupby(
             by=['gid', 'off']
         ).agg({'psr': 'first'}).reset_index()
 
@@ -124,19 +124,17 @@ class GameData:
         return df_qb
 
     @property
-    def schedule_info(self):
+    def player_name(self):
         """
-        Load game date from schedule
+        Return dictionay with keys equal to player id, and values equal
+        to player name
 
         """
-        df_schedule = pd.read_csv(datadir / 'SCHEDULE.csv.gz')
+        df_player = pd.read_csv(datadir / 'PLAYER.csv.gz')
 
-        sched_cols = {'gid': 'game_id', 'date': 'date'}
+        player_name = dict(zip(df_player.player, df_player.pname))
 
-        df_schedule = df_schedule[sched_cols.keys()].rename(sched_cols, axis=1)
-        df_schedule.date = pd.to_datetime(df_schedule.date)
-
-        return df_schedule
+        return player_name
 
     @property
     def team_info(self):
@@ -149,7 +147,7 @@ class GameData:
         team_cols = {
             'gid': 'game_id',
             'tname': 'team',
-            'pts': 'tm_pts',
+            #'pts': 'tm_pts',
             'ry': 'tm_rush_yds',
             'ra': 'tm_rush_att',
             'py': 'tm_pass_yds',
@@ -174,9 +172,135 @@ class GameData:
 
         df_team = df_team[team_cols.keys()].rename(team_cols, axis=1)
 
+        df_team = df_team.merge(self.quarterback_info, on=['game_id', 'team'])
+
         return df_team
 
-    def preprocess(self, games):
+    @property
+    def qb_points(self):
+        """
+        Compute expected points added by each QB per play
+
+        """
+        # load required datasets
+        df_play = pd.read_csv(datadir / 'PLAY.csv.gz')
+        df_sched = pd.read_csv(datadir / 'SCHEDULE.csv.gz')
+        df_rush = pd.read_csv(datadir / 'RUSH.csv.gz')
+        df_drive = pd.read_csv(datadir / 'DRIVE.csv.gz')
+
+        # Merge schedule and play data
+        df_play = df_sched[['date', 'gid', 'v', 'h']].merge(
+            df_play[['gid', 'pid', 'off', 'def', 'epa', 'eps']], on='gid')
+
+        # Merge starting quarterback and rush info
+        df_play = df_play.merge(
+            self.quarterback_info,
+            left_on=['gid', 'off'], right_on=['game_id', 'team']
+        ).merge(df_rush[['pid', 'bc']], on='pid', how='left')
+
+        # Drop non-qb rushing plays
+        non_qb_rusher = ~df_play.bc.isna() & (df_play.qb != df_play.bc)
+        df_play_filtered = df_play[~non_qb_rusher]
+
+        # Aggregate qb expected points added (EPA)
+        df_qb_epa = df_play_filtered.groupby(
+            by=['gid', 'date', 'qb', 'off', 'def', 'h', 'v']
+        ).agg({'epa': 'sum'}).reset_index()
+
+        # Subtract expected points starting (EPS) yielded to opponent
+        df_first_play = df_play.merge(
+            df_drive[['gid', 'fpid']],
+            left_on=['gid', 'pid'], right_on=['gid', 'fpid'])
+
+        # Aggregate each team's expected points starting (EPS)
+        df_qb_eps = df_first_play.groupby(
+            by=['gid', 'team']
+        ).agg({'eps': 'sum'}).reset_index()
+        df_qb_eps['eps'] -= df_qb_eps.eps.mean()
+
+        # Merge EPA and EPS values
+        df_qb = df_qb_epa.merge(
+            df_qb_eps, left_on=['gid', 'def'], right_on=['gid', 'team'])
+
+        # Compute "QB points"
+        df_qb['tm_qb_pts'] = df_qb.epa #- df_qb.eps
+
+        qb_cols = {
+            'gid': 'game_id',
+            'off': 'team',
+            'qb': 'qb',
+            'tm_qb_pts': 'tm_qb_pts'}
+
+        df_qb = df_qb[qb_cols.keys()].rename(qb_cols, axis=1)
+
+        return df_qb
+
+    def rest_days(self, games):
+        """
+        Compute home and away teams days rested
+
+        """
+        game_dates = pd.concat([
+            games[["date", "team_home"]].rename(
+                columns={"team_home": "team"}),
+            games[["date", "team_away"]].rename(
+                columns={"team_away": "team"}),
+        ]).sort_values("date")
+
+        game_dates['date_prev'] = game_dates.date
+
+        game_dates = pd.merge_asof(
+            game_dates[['team', 'date']],
+            game_dates[['team', 'date', 'date_prev']],
+            on='date', by='team', allow_exact_matches=False)
+
+        for team in ["home", "away"]:
+
+            game_dates_team = game_dates.rename(
+                columns={
+                    'date_prev': f'date_{team}_prev',
+                    'team': f'team_{team}'})
+
+            games = games.merge(game_dates_team, on=['date', f'team_{team}'])
+
+        one_day = pd.Timedelta("1 days")
+        games["tm_rest_days_home"] = np.clip(
+            (games.date - games.date_home_prev) / one_day, 3, 16).fillna(7)
+        games["tm_rest_days_away"] = np.clip(
+            (games.date - games.date_away_prev) / one_day, 3, 16).fillna(7)
+
+        return games
+
+    def previous_quarterback(self, games):
+        """
+        Keep track of previous quarterback for each game and each team.
+
+        """
+        game_dates = pd.concat([
+            games[["date", "team_home", "qb_home"]].rename(
+                columns={"team_home": "team", "qb_home": "qb"}),
+            games[["date", "team_away", "qb_away"]].rename(
+                columns={"team_away": "team", "qb_away": "qb"}),
+        ]).sort_values("date")
+
+        game_dates['qb_prev'] = game_dates.qb
+
+        game_dates = pd.merge_asof(
+            game_dates[['team', 'date']],
+            game_dates[['team', 'date', 'qb_prev']],
+            on='date', by='team', allow_exact_matches=False)
+
+        for team in ["home", "away"]:
+
+            game_dates_team = game_dates.rename(
+                columns={'qb_prev': f'qb_prev_{team}',
+                         'team': f'team_{team}'})
+
+            games = games.merge(game_dates_team, on=['date', f'team_{team}'])
+
+        return games
+
+    def calculated_columns(self, games):
         """
         Preprocesses raw game data, returning a model input table.
 
@@ -202,41 +326,11 @@ class GameData:
         games.replace("SD", "LAC", inplace=True)
         games.replace("STL", "LA", inplace=True)
 
-        # game dates for every team
-        game_dates = pd.concat([
-            games[["date", "team_home"]].rename(
-                columns={"team_home": "team"}),
-            games[["date", "team_away"]].rename(
-                columns={"team_away": "team"}),
-        ]).sort_values("date")
+        # compute rest days for each team
+        games = self.rest_days(games)
 
-        # game dates for every team
-        game_dates = pd.concat([
-            games[["date", "team_home"]].rename(
-                columns={"team_home": "team"}),
-            games[["date", "team_away"]].rename(
-                columns={"team_away": "team"}),
-        ]).sort_values("date")
-
-        # compute days rested
-        for team in ["home", "away"]:
-            games_prev = game_dates.rename(
-                columns={"team": "team_{}".format(team)})
-
-            games_prev["date_{}_prev".format(team)] = games.date
-
-            games = pd.merge_asof(
-                games, games_prev,
-                on="date", by="team_{}".format(team),
-                allow_exact_matches=False
-            )
-
-        # days rested since last game
-        one_day = pd.Timedelta("1 days")
-        games["rest_days_home"] = np.clip(
-            (games.date - games.date_home_prev) / one_day, 3, 16).fillna(7)
-        games["rest_days_away"] = np.clip(
-            (games.date - games.date_away_prev) / one_day, 3, 16).fillna(7)
+        # record previous game's qb
+        games = self.previous_quarterback(games)
 
         return games
 
